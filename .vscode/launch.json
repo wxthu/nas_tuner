@@ -1,0 +1,29 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch NSA debug server",
+      "type": "python",
+      "request": "launch",
+      "program": "/home/wangxiang/nsa_debugger/test_nsa.py",
+      // "args": [
+      //   "--model-path",
+      //   "ICTNLP/Llama-3.1-8B-Omni",
+      //   "--port",
+      //   "30000",
+      //   "--host",
+      //   "0.0.0.0",
+      //   "--chat-template",
+      //   "llama_omni",
+      //   "--disable-cuda-graph",
+      //   "--disable-radix-cache"
+      // ],
+      "python": "/home/wangxiang/.conda/envs/nsa/bin/python",
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0",
+      },
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}
