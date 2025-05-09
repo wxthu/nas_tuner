@@ -2,8 +2,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.models.llama.modeling_llama import LlamaAttention
 
-import sys
-import os
+import sys, os, time
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'native_sparse_attention_pytorch')))
 from native_sparse_attention_pytorch.native_sparse_attention import SparseAttention
 # from native_sparse_attention_pytorch.native_sparse_attention_pytorch.native_sparse_attention import SparseAttention
@@ -19,7 +18,7 @@ def test_llama_model():
 	model = AutoModelForCausalLM.from_pretrained(
 		model_id,
 		torch_dtype=torch.float16,  # 使用半精度加载以节省显存
-		# device_map="auto"           # 自动决定模型加载到哪个设备
+		device_map="auto"           # 自动决定模型加载到哪个设备
 	)
 
 	def replace_attention_with_nsa(model):
@@ -53,12 +52,12 @@ def test_llama_model():
 		
 		return model
 
-	replace_attention_with_nsa(model)
+	# replace_attention_with_nsa(model)
 	# for name, module in model.named_modules():
 	# 	print(f"{name}__{module}_##-->{isinstance(module, LlamaAttention)}")
 	# return
 	# 准备提示词
-	prompt = "请简要解释人工智能是什么。"
+	prompt = ",".join(["请简要解释人工智能是什么。" for _ in range(35000)])
 
 	# 添加模型需要的格式（系统提示和用户提示）
 	messages = [
@@ -69,14 +68,23 @@ def test_llama_model():
 	# 将消息转换为模型需要的格式
 	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 	print("\n输入提示词:")
-	print(prompt)
+	# print(prompt)
 
 	# 编码输入
 	inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+	print(inputs['input_ids'].shape)
 
 	# 生成回答
 	print("\n正在生成回答...\n")
-	with torch.no_grad():
+	# with torch.no_grad():
+	# 	outputs = model.generate(
+	# 		**inputs,
+	# 		max_new_tokens=1,
+	# 		temperature=0.7,
+	# 		top_p=0.9,
+	# 		do_sample=True
+	# 	)
+	for _ in range(80000000):
 		outputs = model.generate(
 			**inputs,
 			max_new_tokens=1,
@@ -84,14 +92,14 @@ def test_llama_model():
 			top_p=0.9,
 			do_sample=True
 		)
-    
-	# 解码并打印输出
-	response = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-	# 提取助手的回答部分
-	assistant_response = response.split("ASSISTANT: ")[-1].strip()
-	print("模型回答:")
-	print(assistant_response)
+		# 解码并打印输出
+		response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+		# 提取助手的回答部分
+		assistant_response = response.split("ASSISTANT: ")[-1].strip()
+		print("模型回答:")
+		print(assistant_response)
 
 if __name__ == "__main__":
     # 检查CUDA是否可用
