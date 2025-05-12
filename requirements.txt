@@ -1,0 +1,9 @@
+torch
+deepspeed
+accelerate
+transformers
+local_attention
+rotary-embedding-torch
+einx
+einops
+datasets
