@@ -25,14 +25,7 @@ class LongAlignChatTemplateDataset(Dataset):
             return_tensors="pt"
         )
 
-        input_ids = encoded["input_ids"].squeeze(0)
-        attention_mask = encoded["attention_mask"].squeeze(0)
-
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": input_ids.clone()
-        }
+        return (encoded, encoded.clone()) # input, label
 
 
 class LongAlignFlatDataset(Dataset):
@@ -73,19 +66,20 @@ class LongAlignFlatDataset(Dataset):
         input_ids = encoding["input_ids"].squeeze(0)
         attention_mask = encoding["attention_mask"].squeeze(0)
 
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": input_ids.clone()
-        }
+        # return {
+        #     "input_ids": input_ids,
+        #     "attention_mask": attention_mask,
+        #     "labels": input_ids.clone()
+        # }
+        return (input_ids, attention_mask, input_ids.clone())
 
 if __name__ == '__main__':
-    model_name = "meta-llama/Meta-Llama-3-8B-Instruct"
+    model_name = "meta-llama/Llama-3.1-8B-Instruct"
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token  # 必须设置pad_token
 
     dataset = LongAlignFlatDataset(tokenizer, max_length=8192)
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=3, shuffle=True)
 
     # 查看一个样本
     for batch in dataloader:

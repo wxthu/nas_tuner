@@ -2,6 +2,7 @@ import os
 import deepspeed
 import torch
 import torch.distributed as dist
+import torch.utils.data.dataloader
 
 from llama_nsa import NsaLlamaForCausalLM, load_custom_weights_and_freeze, build_pipeline_llama
 from transformers import LlamaForCausalLM, LlamaConfig, AutoTokenizer
@@ -44,23 +45,25 @@ def train(
     model_engine, _,  _,  _ = deepspeed.initialize(
         model=pipeline_model,
         model_parameters=[p for p in pipeline_model.parameters() if p.requires_grad],
-        config="ds_config.json"
+        config="ds_config.json",
+        training_data=dataset
     )
     
+    # data_loader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True)
     print(f"[Rank {dist.get_rank()}] Start training loop...")
-    print(f"Dataset size: {len(dataset)}")
-    for epoch in range(1):
-        for step, batch in enumerate(dataset):
-            input_ids = batch["input_ids"].to(model_engine.device)
-            attention_mask = batch["attention_mask"].to(model_engine.device)
-            labels = batch["labels"].to(model_engine.device)
+    loss = model_engine.train_batch()
+    # for epoch in range(1):
+    #     for step, batch in enumerate(data_loader):
+    #         input_ids = batch["input_ids"].to(model_engine.device)
+    #         attention_mask = batch["attention_mask"].to(model_engine.device)
+    #         labels = batch["labels"].to(model_engine.device)
             
-            loss = model_engine(input_ids, attention_mask=attention_mask, labels=labels)
-            model_engine.backward(loss)
-            model_engine.step()
+    #         loss = model_engine(input_ids, attention_mask=attention_mask, labels=labels)
+    #         model_engine.backward(loss)
+    #         model_engine.step()
 
-            if step % 10 == 0:
-                print(f"[Epoch {epoch} Step {step}] Loss: {loss.item():.4f}")
+    #         if step % 10 == 0:
+    #             print(f"[Epoch {epoch} Step {step}] Loss: {loss.item():.4f}")
                 
 
 if __name__ == "__main__":

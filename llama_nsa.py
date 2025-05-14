@@ -1,5 +1,7 @@
+import torch
 import torch.nn as nn
 from transformers import LlamaForCausalLM, LlamaConfig, AutoTokenizer
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 from accelerate import dispatch_model, infer_auto_device_map
 from deepspeed.pipe import PipelineModule
 
@@ -7,6 +9,45 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'native_sparse_attention_pytorch')))
 from native_sparse_attention_pytorch.native_sparse_attention import SparseAttention
+
+class LlamaDecoderLayerPipe(nn.Module):
+    def __init__(self, decoder_layer: LlamaDecoderLayer):
+        super().__init__()
+        self.decoder_layer =  decoder_layer
+
+    def forward(self, inputs):
+        (
+            hidden_states,
+            attention_mask,
+            position_ids,
+            past_key_value,
+            output_attentions,
+            use_cache,
+            cache_position,
+            position_embeddings,
+            kwargs
+        ) = inputs
+        
+        outputs = self.decoder_layer(
+            hidden_states,
+            attention_mask,
+            position_ids,
+            past_key_value,
+            output_attentions,
+            use_cache,
+            cache_position,
+            position_embeddings,  # necessary, but kept here for BC
+            **kwargs,
+        )
+        return (outputs, attention_mask)
+
+class EmbeddingLayerPipe(nn.Module):
+    def __init__(self, embed_layer: nn.Embedding):
+        super().__init__()
+        self.embed_layer = embed_layer
+
+    def forward(self, input):
+        return self.embed_layer(input)
 
 class NsaLlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, config: LlamaConfig):
@@ -29,16 +70,17 @@ class NsaLlamaForCausalLM(LlamaForCausalLM):
 
     def to_layers(self):
         layers = [
-            self.model.model.embed_tokens,
-            *self.model.model.layers,
-            self.model.model.norm,
-            self.model.model.rotary_emb,
-            self.model.lm_head
+            EmbeddingLayerPipe(self.model.embed_tokens),
+            *[LlamaDecoderLayerPipe(layer) for layer in self.model.layers],
+            self.model.norm,
+            self.model.rotary_emb,
+            self.lm_head
         ]
         return layers
 
+
 def build_pipeline_llama(model: nn.Module, num_stages: int = 1):
-    return PipelineModule(layers=model.to_layers(), num_stages=num_stages)
+    return PipelineModule(layers=model.to_layers(), num_stages=num_stages, activation_checkpoint_interval=1)
 
 def load_custom_weights_and_freeze(model: nn.Module, pretrained_state_dict: dict):
     for name, param in model.named_parameters():
