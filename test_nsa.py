@@ -57,21 +57,36 @@ def test_llama_model():
 	# 	print(f"{name}__{module}_##-->{isinstance(module, LlamaAttention)}")
 	# return
 	# 准备提示词
-	prompt = ",".join(["请简要解释人工智能是什么。" for _ in range(35000)])
+	prompt = ",".join(["请简要解释人工智能是什么。" for _ in range(1)])
 
 	# 添加模型需要的格式（系统提示和用户提示）
-	messages = [
-		{"role": "system", "content": "你是一个有帮助的AI助手。"},
-		{"role": "user", "content": prompt}
-	]
+	# messages = [
+	# 	{"role": "system", "content": "你是一个有帮助的AI助手。"},
+	# 	{"role": "user", "content": prompt}
+	# ]
     
+	message_list = [
+		[
+			{"role": "system", "content": "你是一个有帮助的AI助手。"},
+			{"role": "user", "content": prompt}
+		],
+		[
+			{"role": "system", "content": "你是一个有帮助的AI助手。"},
+			{"role": "user", "content": "什么是机器学习？"}
+		]
+	]
 	# 将消息转换为模型需要的格式
-	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+	prompts = [
+		tokenizer.apply_chat_template(messages, max_length=100, tokenize=False, add_generation_prompt=True)
+		for messages in message_list
+	]
+	# prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 	print("\n输入提示词:")
 	# print(prompt)
-
+	tokenizer.pad_token = tokenizer.eos_token
 	# 编码输入
-	inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+	inputs = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).to(model.device)
 	print(inputs['input_ids'].shape)
 
 	# 生成回答
@@ -84,7 +99,7 @@ def test_llama_model():
 	# 		top_p=0.9,
 	# 		do_sample=True
 	# 	)
-	for _ in range(80000000):
+	for _ in range(1):
 		outputs = model.generate(
 			**inputs,
 			max_new_tokens=1,

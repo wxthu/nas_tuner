@@ -22,9 +22,9 @@ def load_model_and_tokenizer(model_id: str, num_stages: int):
     pretrained_llama_model = LlamaForCausalLM.from_pretrained(model_id)
     pretrained_state_dict = pretrained_llama_model.state_dict()
     model = NsaLlamaForCausalLM(config)
-    for name, param in model.named_parameters():
-        param.requires_grad = "self_attn" in name
-    # model = load_custom_weights_and_freeze(model, pretrained_state_dict)
+    # for name, param in model.named_parameters():
+    #     param.requires_grad = "self_attn" in name
+    model = load_custom_weights_and_freeze(model, pretrained_state_dict)
     pipeline_model = build_pipeline_llama(model, num_stages=num_stages)
     return tokenizer, pipeline_model
 

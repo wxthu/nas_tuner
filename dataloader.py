@@ -8,6 +8,8 @@ class LongAlignChatTemplateDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.raw_data = load_dataset("THUDM/LongAlign-10k", split="train")
+        
+        self.tokenizer.pad_token = tokenizer.eos_token
 
     def __len__(self):
         return len(self.raw_data)
@@ -19,13 +21,17 @@ class LongAlignChatTemplateDataset(Dataset):
         # 使用 chat template 自动构建 prompt + response 格式
         encoded = self.tokenizer.apply_chat_template(
             messages,
-            tokenize=True,
+            tokenize=False,
             truncation=True,
+            padding=True,
             max_length=self.max_length,
             return_tensors="pt"
         )
 
-        return (encoded, encoded.clone()) # input, label
+        encoded = self.tokenizer(encoded, return_tensors="pt", padding="max_length", truncation=True)
+        input_ids = encoded["input_ids"]
+        attn_mask = encoded["attention_mask"]
+        return ((input_ids, attn_mask), input_ids.clone()) # (input, label)
 
 
 class LongAlignFlatDataset(Dataset):

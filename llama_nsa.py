@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 from transformers import LlamaForCausalLM, LlamaConfig, AutoTokenizer
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm, LlamaRotaryEmbedding
 from accelerate import dispatch_model, infer_auto_device_map
 from deepspeed.pipe import PipelineModule
 
+from typing import Tuple
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'native_sparse_attention_pytorch')))
@@ -15,40 +16,34 @@ class LlamaDecoderLayerPipe(nn.Module):
         super().__init__()
         self.decoder_layer =  decoder_layer
 
-    def forward(self, inputs):
-        (
-            hidden_states,
-            attention_mask,
-            position_ids,
-            past_key_value,
-            output_attentions,
-            use_cache,
-            cache_position,
-            position_embeddings,
-            kwargs
-        ) = inputs
-        
+    def forward(self, inputs: Tuple):
+        hidden_states = inputs[0]        
         outputs = self.decoder_layer(
-            hidden_states,
-            attention_mask,
-            position_ids,
-            past_key_value,
-            output_attentions,
-            use_cache,
-            cache_position,
-            position_embeddings,  # necessary, but kept here for BC
-            **kwargs,
+            hidden_states
         )
-        return (outputs, attention_mask)
+        return outputs
 
 class EmbeddingLayerPipe(nn.Module):
     def __init__(self, embed_layer: nn.Embedding):
         super().__init__()
         self.embed_layer = embed_layer
 
-    def forward(self, input):
-        return self.embed_layer(input)
+    def forward(self, inputs: Tuple):
+        input_ids, _ = inputs
+        return (self.embed_layer(input_ids),)
 
+class LossFuncLayerPipe(nn.Module):
+    def __init__(self, norm: LlamaRMSNorm, lm_head: nn.Linear):
+        super().__init__()
+        self.norm = norm
+        self.lm_head = lm_head
+        
+    def forward(self, inputs: Tuple):
+        hidden_states = self.norm(hidden_states)
+        slice_indices = slice(-1, None)
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        return logits
+    
 class NsaLlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, config: LlamaConfig):
         super().__init__(config)
@@ -72,9 +67,10 @@ class NsaLlamaForCausalLM(LlamaForCausalLM):
         layers = [
             EmbeddingLayerPipe(self.model.embed_tokens),
             *[LlamaDecoderLayerPipe(layer) for layer in self.model.layers],
-            self.model.norm,
-            self.model.rotary_emb,
-            self.lm_head
+            LossFuncLayerPipe(
+                self.model.norm,
+                self.lm_head
+            )
         ]
         return layers
 
