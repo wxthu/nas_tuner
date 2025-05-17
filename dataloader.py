@@ -31,7 +31,10 @@ class LongAlignChatTemplateDataset(Dataset):
         encoded = self.tokenizer(encoded, return_tensors="pt", padding="max_length", truncation=True)
         input_ids = encoded["input_ids"]
         attn_mask = encoded["attention_mask"]
-        return ((input_ids, attn_mask), input_ids.clone()) # (input, label)
+        labels = input_ids.clone()
+        labels[:, :-1] = input_ids[:, 1:]
+        labels[:, -1] = -100 # ignore the loss of last token
+        return ((input_ids, attn_mask), labels)
 
 
 class LongAlignFlatDataset(Dataset):
@@ -92,3 +95,4 @@ if __name__ == '__main__':
         print(batch["input_ids"].shape)
         print(tokenizer.decode(batch["input_ids"][0], skip_special_tokens=True)[:500])
         break
+

@@ -48,7 +48,7 @@ class LossFuncLayerPipe(nn.Module):
         if hidden_states.dim() == 2:
             hidden_states = hidden_states.unsqueeze(0)
         logits = self.lm_head(hidden_states[:, slice_indices, :])
-        return logits
+        return logits.squeeze(0)
     
 class NsaLlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, config: LlamaConfig):
@@ -86,7 +86,7 @@ def build_pipeline_llama(model: nn.Module, num_stages: int = 1):
         layers=model.to_layers(),
         num_stages=num_stages,
         activation_checkpoint_interval=1,
-        loss_fn=nn.CrossEntropyLoss()
+        loss_fn=nn.CrossEntropyLoss(ignore_index=-100)
     )
 
 def load_custom_weights_and_freeze(model: nn.Module, pretrained_state_dict: dict):
@@ -110,3 +110,4 @@ if __name__ == "__main__":
     model = load_custom_weights_and_freeze(model, pretrained_state_dict)
     device_map = infer_auto_device_map(model, no_split_module_classes=["LlamaDecoderLayer"])
     model = dispatch_model(model, device_map=device_map)
+
