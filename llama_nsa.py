@@ -17,9 +17,12 @@ class LlamaDecoderLayerPipe(nn.Module):
         self.decoder_layer =  decoder_layer
 
     def forward(self, inputs: Tuple):
-        hidden_states = inputs[0]        
+        hidden_states = inputs[0]
+        if hidden_states.dim() == 2:
+            hidden_states = hidden_states.unsqueeze(0)
         outputs = self.decoder_layer(
-            hidden_states
+            hidden_states = hidden_states,
+            use_cache = True
         )
         return outputs
 
@@ -39,8 +42,11 @@ class LossFuncLayerPipe(nn.Module):
         self.lm_head = lm_head
         
     def forward(self, inputs: Tuple):
+        hidden_states = inputs[0]
         hidden_states = self.norm(hidden_states)
         slice_indices = slice(-1, None)
+        if hidden_states.dim() == 2:
+            hidden_states = hidden_states.unsqueeze(0)
         logits = self.lm_head(hidden_states[:, slice_indices, :])
         return logits
     
@@ -54,7 +60,7 @@ class NsaLlamaForCausalLM(LlamaForCausalLM):
                 heads = 32,
                 sliding_window_size = 512,
                 compress_block_size = 32,
-                compress_block_sliding_stride = 16,
+                compress_block_sliding_stride = 32,
                 selection_block_size = 32,
                 num_selected_blocks = 16,
                 kv_heads = 8,
@@ -76,7 +82,12 @@ class NsaLlamaForCausalLM(LlamaForCausalLM):
 
 
 def build_pipeline_llama(model: nn.Module, num_stages: int = 1):
-    return PipelineModule(layers=model.to_layers(), num_stages=num_stages, activation_checkpoint_interval=1)
+    return PipelineModule(
+        layers=model.to_layers(),
+        num_stages=num_stages,
+        activation_checkpoint_interval=1,
+        loss_fn=nn.CrossEntropyLoss()
+    )
 
 def load_custom_weights_and_freeze(model: nn.Module, pretrained_state_dict: dict):
     for name, param in model.named_parameters():

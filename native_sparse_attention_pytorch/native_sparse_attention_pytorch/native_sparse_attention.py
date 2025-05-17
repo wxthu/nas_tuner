@@ -150,6 +150,23 @@ def straight_through(t, target):
 
 # attend function
 
+def my_flex_attend(
+  q, k, v, attn_mask, return_score
+):
+    # attn_mask is boolean tensor
+    def mask_gen(bs, head, q_idx, kv_idx):
+        return attn_mask[q_idx][kv_idx]
+
+    block_mask = create_block_mask(mask_gen, B=None, H=None, Q_LEN=attn_mask.shape[0], KV_LEN=attn_mask.shape[1])
+    return flex_attention(
+        query=q,
+        key=k,
+        value=v,
+        block_mask=block_mask,
+        enable_gqa=True,
+        return_lse=return_score
+    )
+
 def attend(
     q, k, v,
     mask = None,
@@ -202,7 +219,7 @@ class SparseAttention(Module):
         causal = True,
         norm = True,
         use_diff_topk = False,
-        use_triton_kernel = False,
+        use_triton_kernel = True,
         query_heads_share_selected_kv = True, # if set to True, importance score is averaged across query heads to select top-n buckets of kv per kv head - but can be set to False for each query head within a group to look at different sets of kv buckets. will be more memory and compute of course
         compress_mlp: Module | None = None,
         compress_mlp_expand_factor = 1.,
@@ -646,7 +663,9 @@ class SparseAttention(Module):
 
             cmask = einx.less('j, i -> i j', ck_seq, cq_seq)
 
-        compressed_attn_out, csim = attend(cq, ck, cv, mask = cmask, return_sim = True)
+        # compressed_attn_out, csim = attend(cq, ck, cv, mask = cmask, return_sim = True)
+        compressed_attn_out, csim = my_flex_attend(cq, ck, cv, attn_mask = cmask, return_score = True)
+        csim = csim.unsqueeze(-1)
 
         # for 2. and 3., will give them relative positions with rotary - compressed needs to be handled separately (even if they already have intra block absolute positions)
 
@@ -677,32 +696,32 @@ class SparseAttention(Module):
         # cannot parse their equation, so will just improvise
         # first we expand all the compressed scores to the full sequence length, then average within each fine / selection block size - pad on the right to 0s, which should be fine as sliding window convers the local anyways
 
-        if has_selected_kv_for_fine_attn:
+        # if has_selected_kv_for_fine_attn:
 
-            if self.compress_block_sliding_stride != self.selection_block_size:
+        #     if self.compress_block_sliding_stride != self.selection_block_size:
 
-                num_compress_per_fine = self.selection_block_size // self.compress_block_sliding_stride
+        #         num_compress_per_fine = self.selection_block_size // self.compress_block_sliding_stride
 
-                round_down_score_len = round_down_mult(importance_scores.shape[-1], num_compress_per_fine)
-                importance_scores = importance_scores[..., :round_down_score_len]
+        #         round_down_score_len = round_down_mult(importance_scores.shape[-1], num_compress_per_fine)
+        #         importance_scores = importance_scores[..., :round_down_score_len]
 
-                if not is_empty(importance_scores):
-                    importance_scores = reduce(importance_scores, '... (j num_compress_per_fine) -> ... j', 'mean', num_compress_per_fine = num_compress_per_fine)
+        #         if not is_empty(importance_scores):
+        #             importance_scores = reduce(importance_scores, '... (j num_compress_per_fine) -> ... j', 'mean', num_compress_per_fine = num_compress_per_fine)
 
-                    i, j = importance_scores.shape[-2:]
+        #             i, j = importance_scores.shape[-2:]
 
-                    # mask out block diagonal
+        #             # mask out block diagonal
 
-                    q_seq = arange(i, device = device) // self.selection_block_size
-                    k_seq = arange(j, device = device)
+        #             q_seq = arange(i, device = device) // self.selection_block_size
+        #             k_seq = arange(j, device = device)
 
-                    block_diagonal_mask = einx.equal('i, j -> i j', q_seq, k_seq)
+        #             block_diagonal_mask = einx.equal('i, j -> i j', q_seq, k_seq)
 
-                    importance_scores = importance_scores.masked_fill(block_diagonal_mask, max_neg_value(csim))
+        #             importance_scores = importance_scores.masked_fill(block_diagonal_mask, max_neg_value(csim))
 
-            importance_scores = F.pad(importance_scores, (1, 0), value = -1e3)
-            importance_scores = importance_scores.softmax(dim = -1)
-            importance_scores = importance_scores[..., 1:]
+        #     importance_scores = F.pad(importance_scores, (1, 0), value = -1e3)
+        #     importance_scores = importance_scores.softmax(dim = -1)
+        #     importance_scores = importance_scores[..., 1:]
 
         # handle if number of total blocks is less than number to select for fine attention
 
