@@ -34,7 +34,7 @@ class LongAlignChatTemplateDataset(Dataset):
         labels = input_ids.clone()
         labels[:, :-1] = input_ids[:, 1:]
         labels[:, -1] = -100 # ignore the loss of last token
-        return ((input_ids, attn_mask), labels.squeeze(0))
+        return ((input_ids, attn_mask), labels)
 
 
 class LongAlignFlatDataset(Dataset):
