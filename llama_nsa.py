@@ -44,11 +44,11 @@ class LossFuncLayerPipe(nn.Module):
     def forward(self, inputs: Tuple):
         hidden_states = inputs[0]
         hidden_states = self.norm(hidden_states)
-        slice_indices = slice(-1, None)
-        if hidden_states.dim() == 2:
-            hidden_states = hidden_states.unsqueeze(0)
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
-        return logits.squeeze(0)
+        # if hidden_states.dim() == 2:
+        #     hidden_states = hidden_states.unsqueeze(0)
+        # logits = self.lm_head(hidden_states[:, slice_indices, :])
+        logits = self.lm_head(hidden_states)
+        return logits.unsqueeze(0)
     
 class NsaLlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, config: LlamaConfig):

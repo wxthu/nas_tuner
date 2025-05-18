@@ -149,6 +149,14 @@ def straight_through(t, target):
     return t + (target - t).detach()
 
 # attend function
+kernel_options = {
+    "BLOCK_M": 64,
+    "BLOCK_N": 64,
+    "BLOCK_M1": 64,
+    "BLOCK_N1": 64,
+    "BLOCK_M2": 64,
+    "BLOCK_N2": 64,
+}
 
 def my_flex_attend(
   q, k, v, attn_mask, return_score
@@ -164,7 +172,8 @@ def my_flex_attend(
         value=v,
         block_mask=block_mask,
         enable_gqa=True,
-        return_lse=return_score
+        return_lse=return_score,
+        kernel_options=kernel_options
     )
 
 def attend(
