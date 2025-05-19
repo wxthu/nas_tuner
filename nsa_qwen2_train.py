@@ -30,7 +30,7 @@ def load_model_and_tokenizer(model_id: str, num_stages: int):
 def train(
     model_id="Qwen/Qwen2.5-0.5B-Instruct",
     num_stages=4,
-    max_length=8192,
+    max_length=30000,
     memory_fraction=1.0,
 ):
     
