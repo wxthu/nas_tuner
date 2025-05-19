@@ -4,7 +4,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 class LongAlignChatTemplateDataset(Dataset):
-    def __init__(self, tokenizer, max_length=8192):
+    def __init__(self, tokenizer, max_length=16384):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.raw_data = load_dataset("THUDM/LongAlign-10k", split="train")
