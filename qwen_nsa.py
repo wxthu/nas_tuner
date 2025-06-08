@@ -2,14 +2,10 @@ import torch
 import torch.nn as nn
 from transformers import Qwen2ForCausalLM, Qwen2Config, AutoTokenizer
 from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RMSNorm
-from accelerate import dispatch_model, infer_auto_device_map
 from deepspeed.pipe import PipelineModule
 
 from typing import Tuple
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'native_sparse_attention_pytorch')))
-from native_sparse_attention_pytorch.native_sparse_attention import SparseAttention
+from native_sparse_attention.modeling_nsa import NativeSparseAttention 
 
 class Qwen2DecoderLayerPipe(nn.Module):
     def __init__(self, decoder_layer: Qwen2DecoderLayer):
@@ -54,20 +50,18 @@ class NsaQwen2ForCausalLM(Qwen2ForCausalLM):
     def __init__(self, config: Qwen2Config):
         super().__init__(config)
         for i, layer in enumerate(self.model.layers):
-            attn = SparseAttention(
-                dim = 896,
-                dim_head = 64,
-                heads = 14,
-                sliding_window_size = 512,
-                compress_block_size = 32,
-                compress_block_sliding_stride = 32,
-                selection_block_size = 32,
-                num_selected_blocks = 16,
-                kv_heads = 2,
+            attn = NativeSparseAttention(
+                hidden_size = 896,
+                num_heads = 64,
+                num_kv_heads = 4,
+                head_dim = 64,
+                block_size = 64,
+                block_counts = 16,
+                window_size = 512,
                 layer_idx = i,
-                use_diff_topk = True,
             )
             layer.self_attn = attn
+
 
     def to_layers(self):
         layers = [
@@ -99,4 +93,3 @@ def load_custom_weights_and_freeze(model: nn.Module, pretrained_state_dict: dict
             param.requires_grad = True
             print(f"{name} not loaded, set to trainable.")
     return model
-

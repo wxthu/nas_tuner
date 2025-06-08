@@ -1,3 +1,4 @@
+
 import csv
 from tqdm import tqdm
 import deepspeed
@@ -31,10 +32,8 @@ def train(
     model_id="Qwen/Qwen2.5-0.5B-Instruct",
     num_stages=4,
     max_length=30000,
-    memory_fraction=1.0,
 ):
     
-    # torch.cuda.set_per_process_memory_fraction(memory_fraction)
     setup_distributed()
     tokenizer, pipeline_model = load_model_and_tokenizer(model_id=model_id, num_stages=num_stages)
 

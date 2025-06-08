@@ -1,6 +1,6 @@
 from transformers import AutoTokenizer, TrainingArguments, Trainer, TrainerCallback
-from llama_nsa import NsaLlamaForCausalLM, load_custom_weights_and_freeze
-from transformers import LlamaForCausalLM, LlamaConfig
+from qwen_nsa import NsaQwen2ForCausalLM, load_custom_weights_and_freeze
+from transformers import Qwen2ForCausalLM, Qwen2Config, AutoTokenizer
 from dataloader import LongAlignChatTemplateDataset
 
 import torch
@@ -23,21 +23,19 @@ class LossLoggerCallback(TrainerCallback):
 
 
 def train(
-    model_id="meta-llama/Llama-3.1-8B-Instruct",
+    model_id="Qwen/Qwen2.5-0.5B-Instruct",
     max_length=8192,
-    memory_fraction=0.95,
 ):
     
-    torch.cuda.set_per_process_memory_fraction(memory_fraction)
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
     # Load model
-    config = LlamaConfig.from_pretrained(model_id)
-    pretrained_llama_model = LlamaForCausalLM.from_pretrained(model_id)
-    pretrained_state_dict = pretrained_llama_model.state_dict()
-    model = NsaLlamaForCausalLM(config)
+    config = Qwen2Config.from_pretrained(model_id)
+    pretrained_qwen_model = Qwen2ForCausalLM.from_pretrained(model_id)
+    pretrained_state_dict = pretrained_qwen_model.state_dict()
+    model = NsaQwen2ForCausalLM(config)
     model = load_custom_weights_and_freeze(model, pretrained_state_dict)
 
     # print(f"xxxxxxxxxx {sum(p.numel() for p in model.parameters() if p.requires_grad)} xxxxxxx")
@@ -55,7 +53,7 @@ def train(
         deepspeed="ds_config.json",  # 跟配置文件一致
         fp16=True,
         remove_unused_columns=False,
-        dataloader_num_workers=4,
+        dataloader_num_workers=1,
     )
 
     trainer = Trainer(
