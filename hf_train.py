@@ -1,12 +1,9 @@
 from transformers import AutoTokenizer, TrainingArguments, Trainer, TrainerCallback
-from qwen_nsa import NsaQwen2ForCausalLM, load_custom_weights_and_freeze
+from nsa_utils.qwen_nsa import NsaQwen2ForCausalLM, load_custom_weights_and_freeze
 from transformers import Qwen2ForCausalLM, Qwen2Config, AutoTokenizer
-from dataloader import LongAlignChatTemplateDataset
+from nsa_utils.dataloader import LongAlignChatTemplateDataset
 
-import torch
-import pandas as pd
 import csv
-import os
 
 class LossLoggerCallback(TrainerCallback):
     def __init__(self, csv_path="loss_log.csv"):

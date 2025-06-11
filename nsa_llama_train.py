@@ -4,9 +4,9 @@ import torch
 import torch.distributed as dist
 import torch.utils.data.dataloader
 
-from llama_nsa import NsaLlamaForCausalLM, load_custom_weights_and_freeze, build_pipeline_llama
+from nsa_utils.llama_nsa import NsaLlamaForCausalLM, load_custom_weights_and_freeze, build_pipeline_llama
 from transformers import LlamaForCausalLM, LlamaConfig, AutoTokenizer
-from dataloader import LongAlignChatTemplateDataset
+from nsa_utils.dataloader import LongAlignChatTemplateDataset
 
 def setup_distributed():
     if not dist.is_initialized():

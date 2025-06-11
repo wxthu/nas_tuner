@@ -6,9 +6,9 @@ import torch
 import torch.distributed as dist
 import torch.utils.data.dataloader
 
-from qwen_nsa import NsaQwen2ForCausalLM, load_custom_weights_and_freeze, build_pipeline_qwen2
+from nsa_utils.qwen_nsa import NsaQwen2ForCausalLM, load_custom_weights_and_freeze, build_pipeline_qwen2
 from transformers import Qwen2ForCausalLM, Qwen2Config, AutoTokenizer
-from dataloader import LongAlignChatTemplateDataset
+from nsa_utils.dataloader import LongAlignChatTemplateDataset
 
 def setup_distributed():
     if not dist.is_initialized():
