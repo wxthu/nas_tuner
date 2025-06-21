@@ -5,7 +5,7 @@
       "name": "Launch NSA debug server",
       "type": "python",
       "request": "launch",
-      "program": "/home/wangxiang/nsa_debugger/test_nsa.py",
+      "program": "/home/wangxiang/nsa_debugger/test_minicpm.py",
       // "args": [
       //   "--model-path",
       //   "ICTNLP/Llama-3.1-8B-Omni",
@@ -20,7 +20,7 @@
       // ],
       "python": "/home/wangxiang/.conda/envs/nsa/bin/python",
       "env": {
-        "CUDA_VISIBLE_DEVICES": "0",
+        "CUDA_VISIBLE_DEVICES": "1",
       },
       "console": "integratedTerminal",
       "justMyCode": false
