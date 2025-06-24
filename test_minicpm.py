@@ -1,6 +1,44 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from nsa_utils.dataloader import LongAlignForInferenceDataset
+from modeling_minicpm import MiniCPMForCausalLM
+
+from typing import Any, Dict, List, Optional, Tuple, Union
+class WrappedMiniCPM(MiniCPMForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+        
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs,
+    ):
+        return super().forward(
+			input_ids=input_ids,
+			attention_mask=attention_mask,
+			position_ids=position_ids,
+			past_key_values=past_key_values,
+			inputs_embeds=inputs_embeds,
+			labels=labels,
+			use_cache=use_cache,
+			output_attentions=output_attentions,
+			output_hidden_states=output_hidden_states,
+			return_dict=return_dict,
+			logits_to_keep=logits_to_keep,
+			**kwargs
+		)
+        
+    
 
 if __name__ == "__main__":
 	torch.manual_seed(0)
@@ -8,7 +46,8 @@ if __name__ == "__main__":
 	max_length = 30000
 	device = "cuda"
 	tokenizer = AutoTokenizer.from_pretrained(path)
-	model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16, device_map=device, trust_remote_code=True)
+	# model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16, device_map=device, trust_remote_code=True)
+	model = WrappedMiniCPM.from_pretrained(path, torch_dtype=torch.bfloat16, device_map=device, trust_remote_code=True)
 
 	dataset = LongAlignForInferenceDataset(tokenizer=tokenizer, max_length=max_length)
 	
