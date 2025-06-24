@@ -20,7 +20,7 @@
       // ],
       "python": "/home/wangxiang/.conda/envs/nsa/bin/python",
       "env": {
-        "CUDA_VISIBLE_DEVICES": "1",
+        "CUDA_VISIBLE_DEVICES": "5",
       },
       "console": "integratedTerminal",
       "justMyCode": false
