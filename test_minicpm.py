@@ -4,6 +4,8 @@ from nsa_utils.dataloader import LongAlignForInferenceDataset
 from modeling_minicpm import MiniCPMForCausalLM
 
 from typing import Any, Dict, List, Optional, Tuple, Union
+import os
+
 class WrappedMiniCPM(MiniCPMForCausalLM):
     def __init__(self, config):
         super().__init__(config)
@@ -43,7 +45,7 @@ class WrappedMiniCPM(MiniCPMForCausalLM):
 if __name__ == "__main__":
 	torch.manual_seed(0)
 	path = 'openbmb/MiniCPM4-8B'
-	max_length = 30000
+	max_length = 165536
 	device = "cuda"
 	tokenizer = AutoTokenizer.from_pretrained(path)
 	# model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16, device_map=device, trust_remote_code=True)
@@ -51,8 +53,10 @@ if __name__ == "__main__":
 
 	dataset = LongAlignForInferenceDataset(tokenizer=tokenizer, max_length=max_length)
 	
+	count = 0
 	for prompt in dataset:
 		prompt = prompt.to(device)
+		print(f"xxxxxxxxxxxxxxxx {prompt['input_ids'].shape} xxxxxxxxxxxxxxxxxxxx")
 		outputs = model.generate(**prompt, max_new_tokens=100, do_sample=False, top_p=0.7, temperature=0.0)
 		output_token_ids = [
 			outputs[i][len(prompt[i]):] for i in range(len(prompt['input_ids']))
@@ -63,4 +67,8 @@ if __name__ == "__main__":
 		print(responses)
 		print("==============================")
 		print(outputs.shape, len(output_token_ids))
-		break
+
+		os.mkdir(f"sample_{count}_seqlen_{prompt['input_ids'].shape[1]}")
+		os.system(f"mv layer_* sample_{count}_seqlen_{prompt['input_ids'].shape[1]}/")
+		count += 1
+		if count >= 10: break

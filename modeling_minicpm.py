@@ -1481,6 +1481,7 @@ class MiniCPMInfLLMv2Attention(MiniCPMAttention):
             init_blocks=self.init_blocks,
             local_blocks=self.local_blocks,
         )
+        # torch.save(topk_idx, f"layer_{self.layer_idx}_selected.pt")
 
         topk_attn_output = infllmv2_attn_varlen_func(
             query_layer,
@@ -1559,6 +1560,7 @@ class MiniCPMInfLLMv2Attention(MiniCPMAttention):
             local_blocks=self.local_blocks,
             total_seq_lens=past_k.shape[1] + 1,  # !Only batch_size=1 is supported at the moment.
         )
+        # torch.save(topk_idx, f"layer_{self.layer_idx}_selected.pt")
 
         repeat_times = 1
         if repeat_times > 1:

@@ -57,11 +57,13 @@ class LongAlignForInferenceDataset(Dataset):
             messages,
             tokenize=False,
             truncation=True,
-            padding=True,
+            padding=False,
             max_length=self.max_length,
             return_tensors="pt"
         )
 
-        encoded = self.tokenizer(encoded, return_tensors="pt", padding="max_length", max_length=self.max_length, truncation=True)
+        # encoded = self.tokenizer(encoded, return_tensors="pt", padding="max_length", max_length=self.max_length, truncation=True)
+        encoded = self.tokenizer(encoded, return_tensors="pt", padding=False, max_length=self.max_length, truncation=True)
+
         return encoded
 
