@@ -17,6 +17,7 @@ import math
 import re
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
+import os
 
 import torch
 import torch.nn.functional as F
@@ -2001,6 +2002,7 @@ class MiniCPMModel(MiniCPMPreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+        # self.tokens = 0
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -2137,6 +2139,11 @@ class MiniCPMModel(MiniCPMPreTrainedModel):
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
+
+        # self.tokens += 1
+        # if self.tokens > 1:
+        #     for i in range(len(self.layers)):
+        #         os.system(f"mv layer_{i}_selected.pt topk_idx_results/layer_{i}_selected_for_token_{self.tokens}.pt")
 
         next_cache = None
         if use_cache:
