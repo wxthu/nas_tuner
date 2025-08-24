@@ -17,11 +17,9 @@ import math
 import re
 import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
-import os
 
 import torch
 import torch.nn.functional as F
-import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.activations import ACT2FN
@@ -48,7 +46,7 @@ from transformers.utils import (
 )
 from transformers.utils.import_utils import is_torch_fx_available
 
-from configuration_minicpm import MiniCPMConfig
+from configuration_minicpm import MiniCPMConfig    #!一定要改
 
 try:
     from flash_attn import flash_attn_func, flash_attn_varlen_func
@@ -58,6 +56,7 @@ try:
         infllmv2_attn_varlen_func,
         infllmv2_attn_with_kvcache,
         max_pooling_1d,
+        max_pooling_1d_varlen
     )
 except:
     pass
@@ -80,51 +79,27 @@ def compressed_attention(
     sm_scale: float = None,
     init_blocks: int = 1,
     local_blocks: int = 2,
-    parallel_topk_compute: Union[str, bool] = 'auto',
-    total_seq_lens=-1,
+    cache_lens=None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Attention between query and compressed key and value. Compute attention output and topk block idx used in topk_sparse_attention.
-
-    Args:
-        q (torch.Tensor): shape [total_q_len, num_q_heads, head_dim]
-        k (torch.Tensor): shape [total_kv_len, num_kv_heads, head_dim]
-        v (torch.Tensor): shape [total_kv_len, num_kv_heads, head_dim]
-        kernel_size (int): kernel size in compress_key_value
-        kernel_stride (int): stride of compress_key_value
-        block_size (int): key value block size for topk sparse attention.
-        topk (int): number of blocks for each query.
-        cu_seqlens_q (torch.Tensor): shape [batch_size + 1], similar to cu_seqlens_q in flash_attn_func_varlen.
-        cu_seqlens_k (torch.Tensor): shape [batch_size + 1], similar to cu_seqlens_k in flash_attn_func_varlen.
-        max_seqlen_q (int): max q len of the batch.
-        max_seqlen_k (int): max k len of the batch.
-        sm_scale (float, optional): softmax scale. Defaults to None, means 1/sqrt(head_dim).
-        init_blocks (int, optional): Number of init blocks for each query. Defaults to 1.
-        local_blocks (int, optional): Number of local blocks for each query. Defaults to 2.
-        parallel_topk_compute (str, optional): Only set it to False when the sequence length is too long. This can avoid a current bug.
-            We'll fix this issue later. Defaults to auto, it will be set to False when the sequence length is greater than 32k and True otherwise.
-
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]: attention output and topk_idx used in topk_sparse_attention
-    """
     with torch.no_grad():
-        cache_len = 0
         batch_size = cu_seqlens_q.shape[0] - 1
-        if total_seq_lens == -1:
-            total_seq_lens = max_seqlen_q
-            q_idx = torch.cat(
-                [
-                    torch.arange(cu_seqlens_q[i + 1] - cu_seqlens_q[i], device=q.device) + total_seq_lens - (cu_seqlens_q[i + 1] - cu_seqlens_q[i])
-                    for i in range(batch_size)
-                ],
-                dim=0,
-            )
-            q_idx = q_idx // block_size
 
-        else:
-            cache_len = total_seq_lens - max_seqlen_q
-            assert batch_size == 1, 'batch_size must be 1 when total_seq_lens is set'
-            q_idx = torch.tensor([total_seq_lens - 1], device=q.device, dtype=torch.int32) // block_size
+        # Check if it's prefilling stage
+        is_prefilling = cache_lens is None or (cache_lens == 0).all().item()
 
+        if is_prefilling:  # prefilling stage
+            # Calculate q_idx for each query position in each batch
+            cache_lens = torch.zeros(batch_size, dtype=torch.int32, device=q.device)
+            q_idx = torch.cat([
+                (torch.arange(cu_seqlens_q[i + 1] - cu_seqlens_q[i], device=q.device) +
+                 max_seqlen_q - (cu_seqlens_q[i + 1] - cu_seqlens_q[i])) // block_size
+                for i in range(batch_size)
+            ], dim=0)  # shape: [total_q_len]
+        else:  # decoding stage
+            # Each batch has only one query (last position)
+            q_idx = cache_lens // block_size  # shape: [batch_size] = [total_q_len] in decoding
+
+        # 计算attention score
         score = infllmv2_attn_stage1(
             q.contiguous(),
             k.contiguous(),
@@ -133,18 +108,24 @@ def compressed_attention(
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
-            causal=q_idx.shape[0] > 1)
-        score = score[:, :q_idx.shape[0], :]
+            causal=is_prefilling
+        )
+        score = score[:, :q_idx.shape[0], :]  # [num_heads, total_q_len, num_blocks]
 
-        # Replace transform_score with max_pooling_1d
-        block_score = max_pooling_1d(
+        block_score = max_pooling_1d_varlen(
             score.contiguous(),
-            cache_len=cache_len,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            cache_lens,
+            max_seqlen_q,
+            max_seqlen_k,
             local_blocks=local_blocks,
             init_blocks=init_blocks,
             block_size=block_size,
-            stride=kernel_stride,
-        )
+            stride=kernel_stride
+        )  # shape: [num_heads, total_q_len, num_blocks]
+
+
         # get topk
         topk = min(topk, block_score.shape[-1])
         topk_idx = block_score.topk(topk, dim=-1).indices.sort(-1).values
@@ -279,6 +260,7 @@ class DynamicCacheQKV(DynamicCache):
             self.no_compress_k_cache: List[torch.Tensor] = []
             self.cached_compressed_cu_seqlens: List[torch.Tensor] = []
             self.no_rope_key_cache: List[torch.Tensor] = []
+            self.compress_k_cache_varlen: List[torch.Tensor] = []
         else:
             self.key_cache: List[torch.Tensor] = [[] for _ in range(num_hidden_layers)]
             self.value_cache: List[torch.Tensor] = [[] for _ in range(num_hidden_layers)]
@@ -286,6 +268,7 @@ class DynamicCacheQKV(DynamicCache):
             self.no_compress_k_cache: List[torch.Tensor] = [[] for _ in range(num_hidden_layers)]
             self.cached_compressed_cu_seqlens: List[torch.Tensor] = [[] for _ in range(num_hidden_layers)]
             self.no_rope_key_cache: List[torch.Tensor] = [[] for _ in range(num_hidden_layers)]
+            self.compress_k_cache_varlen: List[torch.Tensor] = [[] for _ in range(num_hidden_layers)]
         self._seen_tokens = 0  # Used in `generate` to keep tally of how many tokens the cache has seen
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
@@ -376,38 +359,53 @@ class DynamicCacheQKV(DynamicCache):
 
     def update_compress_k(
         self,
-        key_states: torch.Tensor,
+        key_states: List[torch.Tensor],
         layer_idx: int,
+        cu_seqlens: Optional[torch.Tensor] = None,
         cache_kwargs: Optional[Dict[str, Any]] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
-
-        Parameters:
-            key_states (`torch.Tensor`):
-                The new key states to cache.
-            value_states (`torch.Tensor`):
-                The new value states to cache.
-            layer_idx (`int`):
-                The index of the layer to cache the states for.
-            cache_kwargs (`Dict[str, Any]`, `optional`):
-                Additional arguments for the cache subclass. No additional arguments are used in `DynamicCache`.
-
-        Return:
-            A tuple containing the updated key and value states.
+        Updates the cache with the new compressed key states for the layer `layer_idx`.
         """
 
-        # Update the cache
-        if len(self.compress_k_cache) <= layer_idx:
-            self.compress_k_cache.append(key_states)
 
-        # content on layer cache can be a tensor and checking not tensor causes errors
-        # so we explicitly check for the empty list
-        elif self.compress_k_cache[layer_idx] == []:
-            self.compress_k_cache[layer_idx] = key_states
+        if len(self.compress_k_cache) <= layer_idx or self.compress_k_cache[layer_idx] == []:
+            # Prefilling stage: key_states is in varlen format
+            if cu_seqlens is not None:
+                if len(self.cached_compressed_cu_seqlens) <= layer_idx:
+                    self.cached_compressed_cu_seqlens.append(cu_seqlens.clone())
+                else:
+                    self.cached_compressed_cu_seqlens[layer_idx] = cu_seqlens.clone()
+
+            # Directly assign varlen format
+            if len(self.compress_k_cache_varlen) <= layer_idx:
+                self.compress_k_cache_varlen.append(key_states)
+            else:
+                self.cached_compressed_cu_seqlens[layer_idx] = key_states
+            split_sizes = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            key_states_list = list(torch.split(key_states, split_sizes))
+            if len(self.compress_k_cache) <= layer_idx:
+                self.compress_k_cache.append(key_states_list)
+            else:
+
+                self.compress_k_cache[layer_idx] = key_states_list
+            return self.compress_k_cache_varlen[layer_idx], self.cached_compressed_cu_seqlens[layer_idx]
+
         else:
-            self.compress_k_cache[layer_idx] = torch.cat([self.compress_k_cache[layer_idx], key_states], dim=0)
-        return self.compress_k_cache[layer_idx]
+            has_updates = False
+            for index, k in enumerate(key_states):
+                if k == None:
+                    continue
+                else:
+                    self.compress_k_cache[layer_idx][index] = torch.cat([self.compress_k_cache[layer_idx][index],k],dim=0)
+                    has_updates = True
+            if has_updates ==True:
+                new_seq_lens = torch.tensor([tensor.shape[0] for tensor in self.compress_k_cache[layer_idx]], dtype=torch.int32, device=self.compress_k_cache[layer_idx][0].device)
+                new_cumsum = torch.cumsum(new_seq_lens, dim=0, dtype=torch.int32)
+                self.cached_compressed_cu_seqlens[layer_idx] = torch.cat([torch.tensor([0], dtype=torch.int32, device=new_cumsum.device), new_cumsum])
+                self.compress_k_cache_varlen[layer_idx] = torch.cat(self.compress_k_cache[layer_idx],dim=0)
+
+            return self.compress_k_cache_varlen[layer_idx], self.cached_compressed_cu_seqlens[layer_idx]
 
     def update_no_compress_k(
         self,
@@ -442,16 +440,20 @@ class DynamicCacheQKV(DynamicCache):
         elif self.no_compress_k_cache[layer_idx] == []:
             self.no_compress_k_cache[layer_idx] = key_states
         else:
-            self.no_compress_k_cache[layer_idx] = torch.cat([self.no_compress_k_cache[layer_idx], key_states], dim=0)
+            k_chunk_list=[]
+            for index, k in enumerate(key_states):
 
-        current_len = self.no_compress_k_cache[layer_idx].shape[0]
+                self.no_compress_k_cache[layer_idx][index] = torch.cat([self.no_compress_k_cache[layer_idx][index], key_states[index]], dim=0)
 
-        if current_len >= kernel_size:
-            k_chunk = self.no_compress_k_cache[layer_idx][:kernel_size]
-            self.no_compress_k_cache[layer_idx] = self.no_compress_k_cache[layer_idx][kernel_stride:]
-            return k_chunk
-        else:
-            return None
+                current_len = self.no_compress_k_cache[layer_idx][index].shape[0]
+
+                if current_len >= kernel_size:
+                    k_chunk_list.append(self.no_compress_k_cache[layer_idx][index][:kernel_size])
+                    self.no_compress_k_cache[layer_idx][index] = self.no_compress_k_cache[layer_idx][index][kernel_stride:]
+                else:
+                    k_chunk_list.append(None)
+            return k_chunk_list
+
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         """Returns the sequence length of the cached states. A layer index can be optionally passed."""
@@ -797,7 +799,21 @@ class MiniCPMMLP(nn.Module):
 
         return down_proj
 
+def _unpad_one_tensor(hidden_states, attention_mask):
+    # Unpad the hidden states using the indices
+    indices, cu_seqlens, max_seqlen_in_batch = _get_unpad_data(attention_mask)
+    batch_size, seq_len = hidden_states.shape[:2]
 
+    # Get the remaining dimensions
+    remaining_dims = hidden_states.shape[2:]
+
+    # Reshape to (batch_size * seq_len, *remaining_dims)
+    reshaped_states = hidden_states.reshape(batch_size * seq_len, *remaining_dims)
+
+    # Apply unpadding using indices
+    unpadded_states = index_first_axis(reshaped_states, indices)
+
+    return unpadded_states, indices, cu_seqlens, max_seqlen_in_batch
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
@@ -1238,7 +1254,7 @@ class MiniCPMInfLLMv2Attention(MiniCPMAttention):
         output_attentions = False
 
         bsz, q_len, _ = hidden_states.size()
-        assert bsz == 1, 'Only batch_size=1 is supported at the moment.'
+
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -1309,15 +1325,11 @@ class MiniCPMInfLLMv2Attention(MiniCPMAttention):
         if kv_seq_len < self.dense_len:
             attn_output = self._flash_attention_forward_dense(
                 query_states, key_states, value_states, attention_mask, q_len, dropout=dropout_rate)
-        elif past_key_value is None or q_len != 1:    # prefilling
-            attn_output = self._flash_attention_forward(
+        else:
+            attn_output = self._sparse_attention_forward(
                 query_states, key_states, value_states, attention_mask, q_len, dropout=dropout_rate,
                 no_rope_param=no_rope_param,  # if past_key_value is not None else None,
                 past_key_value=past_key_value)
-        else:
-            attn_output = self._flash_attention_forward_with_kv_cache(
-                query_states, key_states, value_states, attention_mask, q_len, dropout=dropout_rate, no_rope_param=no_rope_param, past_key_value=past_key_value)
-
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
         attn_output = self.o_proj(attn_output)
 
@@ -1326,123 +1338,138 @@ class MiniCPMInfLLMv2Attention(MiniCPMAttention):
 
         return attn_output, attn_weights, past_key_value
 
-    def _flash_attention_forward(
-        self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None, no_rope_param=None, past_key_value=None
-    ):
+    def _sparse_attention_forward(
+            self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None, no_rope_param=None, past_key_value=None
+        ):
+            """
+            Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
+            first unpad the input, then computes the attention scores and pad the final attention scores.
+
+            Args:
+                query_states (`torch.Tensor`):
+                    Input query states to be passed to Flash Attention API
+                key_states (`torch.Tensor`):
+                    Input key states to be passed to Flash Attention API
+                value_states (`torch.Tensor`):
+                    Input value states to be passed to Flash Attention API
+                attention_mask (`torch.Tensor`):
+                    The padding mask - corresponds to a tensor of size `(batch_size, seq_len)` where 0 stands for the
+                    position of padding tokens and 1 for the position of non-padding tokens.
+                dropout (`int`, *optional*):
+                    Attention dropout
+                softmax_scale (`float`, *optional*):
+                    The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim)
+            """
+            if not self._flash_attn_uses_top_left_mask:
+                causal = self.is_causal
+            else:
+                # TODO: Remove the `query_length != 1` check once Flash Attention for RoCm is bumped to 2.1. For details, please see the comment in MiniCPMFlashAttention2 __init__.
+                causal = self.is_causal and query_length != 1
+            # Contains at least one padding token in the sequence
+            if attention_mask is not None:
+                batch_size = query_states.shape[0]
+                # assert batch_size == 1, 'Only batch_size=1 is supported at the moment.'
+                if past_key_value!=None:
+                    compressed_k, compressed_cu_seqlens = self.get_compress_k(
+                        key_states=key_states if self.use_nope ==False else no_rope_param['key_states_no_rope'],
+                        attention_mask=attention_mask,
+                        past_key_value=past_key_value,
+
+                    )
+
+                query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
+                    query_states, key_states, value_states, attention_mask, query_length
+                )
+                cu_seqlens_q, cu_seqlens_k = cu_seq_lens
+                max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
+                if past_key_value==None:
+                    # compress_k use varlen form
+                    compressed_k, compressed_cu_seqlens = self.compress_k(key_states,cu_seqlens_k)
+
+
+                attn_output_unpad = self.sparse_forward(
+                    query_states,
+                    key_states,
+                    value_states,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    max_seqlen_in_batch_q,
+                    max_seqlen_in_batch_k,
+                    no_rope_param=no_rope_param,
+                    compressed_k=compressed_k, compressed_cu_seqlens=compressed_cu_seqlens
+                )
+
+                attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
+
+            else:
+                raise ValueError('Need attention mask')
+
+            return attn_output
+    def get_compress_k(self, key_states, attention_mask, past_key_value):
         """
-        Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
-        first unpad the input, then computes the attention scores and pad the final attention scores.
+        Get compressed key states and corresponding cumulative sequence lengths.
 
         Args:
-            query_states (`torch.Tensor`):
-                Input query states to be passed to Flash Attention API
-            key_states (`torch.Tensor`):
-                Input key states to be passed to Flash Attention API
-            value_states (`torch.Tensor`):
-                Input value states to be passed to Flash Attention API
-            attention_mask (`torch.Tensor`):
-                The padding mask - corresponds to a tensor of size `(batch_size, seq_len)` where 0 stands for the
-                position of padding tokens and 1 for the position of non-padding tokens.
-            dropout (`int`, *optional*):
-                Attention dropout
-            softmax_scale (`float`, *optional*):
-                The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim)
+            key_states: Key states tensor
+            cu_seqlens_k: Cumulative sequence lengths for keys
+            past_key_value: Past key-value cache
+            no_rope_param: Optional parameter containing key states without rope
+
+        Returns:
+            Tuple of (compressed_k, compressed_cu_seqlens)
         """
-        if not self._flash_attn_uses_top_left_mask:
-            causal = self.is_causal
+
+        # Check if this is prefilling or initial compression condition
+        is_prefilling = (key_states.shape[1] >= self.dense_len and
+                        (past_key_value.compress_k_cache == [] or
+                        len(past_key_value.compress_k_cache) < self.layer_idx + 1 or
+                        past_key_value.compress_k_cache[self.layer_idx] == []))
+
+        if is_prefilling:
+
+            unpadded_key_states, indices, cu_seqlens, max_seqlen_in_batch = _unpad_one_tensor(key_states,attention_mask=attention_mask)
+            # Compress the keys
+            compressed_k, compressed_cu_seqlens = self.compress_k(unpadded_key_states, cu_seqlens)
+
+            past_key_value.update_compress_k(
+                compressed_k, self.layer_idx, compressed_cu_seqlens)
+
+            no_compress_k_list = []
+            # Compute and update no_compress_k
+            for i in range(len(compressed_cu_seqlens)-1):
+                no_compress_k_start = (compressed_cu_seqlens[i+1]- compressed_cu_seqlens[i]) * self.kernel_stride
+                #! 这边要看看是不是可能是空的
+                no_compress_k_list.append(unpadded_key_states[cu_seqlens[i]+no_compress_k_start:cu_seqlens[i+1]].clone())
+
+            past_key_value.update_no_compress_k(
+                no_compress_k_list, self.layer_idx,kernel_stride=self.kernel_stride,
+                kernel_size=self.kernel_size)
+
         else:
-            # TODO: Remove the `query_length != 1` check once Flash Attention for RoCm is bumped to 2.1. For details, please see the comment in MiniCPMFlashAttention2 __init__.
-            causal = self.is_causal and query_length != 1
-        # Contains at least one padding token in the sequence
-        if attention_mask is not None:
-            batch_size = query_states.shape[0]
-            query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
-                query_states, key_states, value_states, attention_mask, query_length
-            )
-            if no_rope_param is not None:
-                # nope unpad
-                no_rope_param['query_states_no_rope'] = no_rope_param['query_states_no_rope'].squeeze(0)
-                no_rope_param['key_states_no_rope'] = no_rope_param['key_states_no_rope'].squeeze(0)
+            # Decode case: incremental update
+            batch_size = key_states.shape[0] # key_states.shape = [batch_size, seq, k_head_num, head_dim]
+            key_states_split = list(torch.split(
+                key_states[:,-1:].squeeze(1), #[batch_size, seq, k_head_num, head_dim]->[batch_size, 1, k_head_num, head_dim]-> [batch_size, k_head_num, head_dim]
+                [1] * batch_size,dim=0,
+            ))
+            # Try to update no_compress_k buffer
+            no_compress_k_list = past_key_value.update_no_compress_k(
+                key_states_split, self.layer_idx,
+                kernel_stride=self.kernel_stride,
+                kernel_size=self.kernel_size)
+            new_compressed_k_list = []
+            for no_compress_k in no_compress_k_list:
 
-            cu_seqlens_q, cu_seqlens_k = cu_seq_lens
-            max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
-            attn_output_unpad = self.sparse_forward(
-                query_states,
-                key_states,
-                value_states,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                max_seqlen_in_batch_q,
-                max_seqlen_in_batch_k,
-                no_rope_param=no_rope_param,
-                past_key_value=past_key_value,
-            )
+                if no_compress_k is not None:
+                    # We have enough tokens to compress
+                    new_compressed_k = no_compress_k.mean(dim=0, keepdim=True)  # [1, n_heads_k, head_dim]
 
-            attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
-        else:
-            raise ValueError('Need attention mask')
+                    new_compressed_k_list.append(new_compressed_k)
+                else:
+                    new_compressed_k_list.append(None)
+            compressed_k, compressed_cu_seqlens = past_key_value.update_compress_k(new_compressed_k_list, self.layer_idx,)
 
-        return attn_output
-
-    def _flash_attention_forward_with_kv_cache(
-        self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None, no_rope_param=None, past_key_value=None
-    ):
-        """
-        Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
-        first unpad the input, then computes the attention scores and pad the final attention scores.
-
-        Args:
-            query_states (`torch.Tensor`):
-                Input query states to be passed to Flash Attention API
-            key_states (`torch.Tensor`):
-                Input key states to be passed to Flash Attention API
-            value_states (`torch.Tensor`):
-                Input value states to be passed to Flash Attention API
-            attention_mask (`torch.Tensor`):
-                The padding mask - corresponds to a tensor of size `(batch_size, seq_len)` where 0 stands for the
-                position of padding tokens and 1 for the position of non-padding tokens.
-            dropout (`int`, *optional*):
-                Attention dropout
-            softmax_scale (`float`, *optional*):
-                The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim)
-        """
-        if not self._flash_attn_uses_top_left_mask:
-            causal = self.is_causal
-        else:
-            # TODO: Remove the `query_length != 1` check once Flash Attention for RoCm is bumped to 2.1. For details, please see the comment in MiniCPMFlashAttention2 __init__.
-            causal = self.is_causal and query_length != 1
-        # Contains at least one padding token in the sequence
-        if attention_mask is not None:
-
-            batch_size = query_states.shape[0]
-
-            # query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
-            #     query_states, key_states, value_states, attention_mask, query_length=query_length
-            # )
-
-            assert batch_size == 1, 'Only batch_size=1 is supported at the moment.'
-            # prepare past kv ,new kv
-            new_q = query_states
-
-            new_k = key_states[:, -1:, :, :].contiguous()
-            new_v = value_states[:, -1:, :, :].contiguous()
-
-            past_k = key_states[:, :-1, :, :].contiguous()
-            past_v = value_states[:, :-1, :, :].contiguous()
-            if no_rope_param is not None:
-                # nope unpad
-                no_rope_param['query_states_no_rope'] = no_rope_param['query_states_no_rope'].squeeze(0)
-                no_rope_param['key_states_no_rope'] = no_rope_param['key_states_no_rope'].squeeze(0)
-
-            attn_output = self.sparse_forward_with_kv_cache(
-                past_k=past_k, past_v=past_v, new_k=new_k, new_v=new_v, new_q=new_q, batch_size=batch_size, no_rope_param=no_rope_param, past_key_value=past_key_value)
-
-            # attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
-        else:
-            raise ValueError('need attention mask')
-
-        return attn_output
-
+        return compressed_k, compressed_cu_seqlens
     def sparse_forward(self,
                        query_layer,
                        key_layer,
@@ -1452,24 +1479,17 @@ class MiniCPMInfLLMv2Attention(MiniCPMAttention):
                        max_seqlen_in_batch_q,
                        max_seqlen_in_batch_k,
                        no_rope_param=None,
-                       past_key_value=None):
-        stage1_k = key_layer if no_rope_param is None else no_rope_param['key_states_no_rope']
-        compressed_k, compressed_cu_seqlens = self.compress_k(stage1_k, cu_seqlens_k)
-        compressed_v = compressed_k.clone()
-        if past_key_value is not None:
-            # Compute the start indices of keys (k) that were not compressed, Only batch_size=1 is supported at the moment.
-            no_compress_k_start = compressed_k.shape[0] * self.kernel_stride
-            past_key_value.update_compress_k(
-                compressed_k, self.layer_idx
-            )
-            past_key_value.update_no_compress_k(
-                key_layer[no_compress_k_start:], self.layer_idx, no_compress_k_start)
-            past_key_value.cached_compressed_cu_seqlens.append(compressed_cu_seqlens)
+                       compressed_k=None, compressed_cu_seqlens=None):
         compressed_seqlens = compressed_cu_seqlens[1:] - compressed_cu_seqlens[:-1]
+        cache_lens = None
+        if max_seqlen_in_batch_q==1 and max_seqlen_in_batch_k>1: #decoding
+            seq_lens_k =  cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+            cache_lens = seq_lens_k-1
+
         topk_idx = compressed_attention(
             query_layer if no_rope_param is None else no_rope_param['query_states_no_rope'],
             compressed_k,
-            compressed_v,
+            compressed_k.clone(),
             self.kernel_size,
             self.kernel_stride,
             self.block_size,
@@ -1481,9 +1501,8 @@ class MiniCPMInfLLMv2Attention(MiniCPMAttention):
             None,
             init_blocks=self.init_blocks,
             local_blocks=self.local_blocks,
+            cache_lens=cache_lens
         )
-        # torch.save(topk_idx, f"layer_{self.layer_idx}_selected.pt")
-
         topk_attn_output = infllmv2_attn_varlen_func(
             query_layer,
             key_layer,
@@ -1495,101 +1514,12 @@ class MiniCPMInfLLMv2Attention(MiniCPMAttention):
             dropout_p=0.0,
             deterministic=False,
             softmax_scale=None,
-            causal=True,
+            causal=max_seqlen_in_batch_q != 1,
             return_attn_probs=False,
             block_window_size=self.window_size // self.block_size,
             topk_idx=topk_idx
         )
 
-        return topk_attn_output
-
-    def sparse_forward_with_kv_cache(self, past_k=None, past_v=None, new_k=None, new_v=None, new_q=None, batch_size=None, no_rope_param=None, past_key_value=None):
-
-        # stage1_k = new_k.squeeze(0) if no_rope_param is None else no_rope_param['key_states_no_rope']
-        if past_k.shape[1] + new_k.shape[1] == self.dense_len and (past_key_value.compress_k_cache == [] or len(past_key_value.compress_k_cache) < self.layer_idx + 1 or past_key_value.compress_k_cache[self.layer_idx] == []):
-            if no_rope_param is not None:
-                stage1_k = past_key_value.no_rope_key_cache[self.layer_idx].squeeze(0).contiguous()  # just batch_size ==1
-            else:
-                stage1_k = torch.cat([past_k, new_k], dim=1).contiguous().squeeze(0).contiguous()  # just batch_size ==1
-            compressed_k, compressed_cu_seqlens = self.compress_k(stage1_k, torch.tensor([0, stage1_k.shape[0]], device=stage1_k.device, dtype=torch.int32))  # just batch_size ==1
-
-            # Compute the start indices of keys (k) that were not compressed, Only batch_size=1 is supported at the moment.
-            no_compress_k_start = compressed_k.shape[0] * self.kernel_stride
-            past_key_value.update_compress_k(
-                compressed_k, self.layer_idx
-            )
-            past_key_value.update_no_compress_k(
-                stage1_k[no_compress_k_start:], self.layer_idx, no_compress_k_start)
-            past_key_value.cached_compressed_cu_seqlens.append(compressed_cu_seqlens)
-
-        else:
-            stage1_k = new_k.squeeze(0) if no_rope_param is None else no_rope_param['key_states_no_rope']
-            no_compress_k = past_key_value.update_no_compress_k(
-                stage1_k, self.layer_idx, kernel_stride=self.kernel_stride, kernel_size=self.kernel_size)
-            if no_compress_k is not None:
-                compressed_k = no_compress_k.mean(dim=0, keepdim=True)  # [1, n_heads_k, head_dim]
-
-                compressed_k = past_key_value.update_compress_k(
-                    compressed_k, self.layer_idx)  # [seqlen, nheads_k, head_dim]
-
-                past_key_value.cached_compressed_cu_seqlens[self.layer_idx][-1] += 1    # !Increment the last entry in sequence lengths by 1; currently supports only batch_size = 1
-                compressed_cu_seqlens = past_key_value.cached_compressed_cu_seqlens[self.layer_idx]
-            else:
-                compressed_k = past_key_value.compress_k_cache[self.layer_idx]  # [seqlen, nheads_k, head_dim]
-                compressed_cu_seqlens = past_key_value.cached_compressed_cu_seqlens[self.layer_idx]
-
-        compressed_v = compressed_k.clone()
-
-        compressed_seqlens = compressed_cu_seqlens[1:] - compressed_cu_seqlens[:-1]
-        torch.cuda.synchronize()
-        # Manually verify that the lengths match
-        assert compressed_k.shape[0] == compressed_seqlens.sum().item(), 'The length of compressed_k does not match the sum of compressed_seqlens'
-        topk_idx = compressed_attention(
-            new_q.squeeze(0).contiguous() if no_rope_param is None else no_rope_param['query_states_no_rope'],
-            compressed_k,
-            compressed_v,
-            self.kernel_size,
-            self.kernel_stride,
-            self.block_size,
-            self.topk,
-            torch.tensor([0, 1], device=compressed_k.device, dtype=torch.int32),
-            compressed_cu_seqlens,
-            1,
-            compressed_seqlens.max().item(),
-            None,
-            init_blocks=self.init_blocks,
-            local_blocks=self.local_blocks,
-            total_seq_lens=past_k.shape[1] + 1,  # !Only batch_size=1 is supported at the moment.
-        )
-        # torch.save(topk_idx, f"layer_{self.layer_idx}_selected.pt")
-
-        repeat_times = 1
-        if repeat_times > 1:
-            new_q = new_q.repeat_interleave(repeat_times, dim=-2)
-        else:
-            new_q = new_q
-
-        cache_batch_idx = torch.arange(batch_size, device=new_q.device, dtype=torch.int32)
-
-        seqlen_k = past_k.shape[1] + new_k.shape[1]  # !Only batch_size=1 is supported at the moment.
-        seqlens_k = torch.full((batch_size,), seqlen_k - 1, dtype=torch.int32, device=new_q.device)
-
-        past_k = torch.cat([past_k, torch.zeros_like(new_k, dtype=new_k.dtype)], dim=1).contiguous()   # Append one zero vector to avoid potential out-of-bounds access
-        past_v = torch.cat([past_v, torch.zeros_like(new_v, dtype=new_v.dtype)], dim=1).contiguous()   # Append one zero vector to avoid potential out-of-bounds access
-        topk_attn_output = infllmv2_attn_with_kvcache(
-            q=new_q,
-            k_cache=past_k,
-            v_cache=past_v,
-            topk_idx=topk_idx,
-            block_window_size=self.window_size // self.block_size,
-            k=new_k,                   # [batch_size, 1, nheads_k, d]
-            v=new_v,                   # [batch_size, 1, nheads_k, d]
-            cache_seqlens=seqlens_k,   # current_seqlens_k-1
-            rotary_cos=None,           # No rotary embeddings
-            rotary_sin=None,           # No rotary embeddings
-            cache_batch_idx=cache_batch_idx,
-            causal=False,              # Renaming to match function signature
-        )
         return topk_attn_output
 
     def _flash_attention_forward_dense(
@@ -2002,7 +1932,6 @@ class MiniCPMModel(MiniCPMPreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
-        # self.tokens = 0
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -2139,11 +2068,6 @@ class MiniCPMModel(MiniCPMPreTrainedModel):
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
-
-        # self.tokens += 1
-        # if self.tokens > 1:
-        #     for i in range(len(self.layers)):
-        #         os.system(f"mv layer_{i}_selected.pt topk_idx_results/layer_{i}_selected_for_token_{self.tokens}.pt")
 
         next_cache = None
         if use_cache:
